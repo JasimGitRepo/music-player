@@ -58,20 +58,25 @@ class MusicRepository(
     suspend fun resolvePlayStream(song: Song): Song? = withContext(Dispatchers.IO) {
         try {
             val dbSong = songDao.getSongById(song.id) ?: song
-            if (dbSong.streamUrl.isNotEmpty() && !dbSong.streamUrl.startsWith("http://placeholder") && !dbSong.id.startsWith("yt_mock")) {
-                return@withContext dbSong
+            val currentStreamUrl = dbSong.streamUrl.ifEmpty { song.streamUrl }
+
+            if (currentStreamUrl.isNotEmpty() && !currentStreamUrl.startsWith("http://placeholder") && !dbSong.id.startsWith("yt_mock")) {
+                if (!dbSong.lyrics.isNullOrBlank()) {
+                    return@withContext dbSong.copy(streamUrl = currentStreamUrl)
+                }
             }
             Log.d("MusicRepository", "Resolving stream link dynamically for: ${song.title}")
             val result = geminiService.resolvePlayableStream(song.id, song.title, song.artist)
             if (result != null) {
+                val finalStream = result.streamUrl.ifEmpty { currentStreamUrl }
                 val updatedSong = dbSong.copy(
-                    streamUrl = result.streamUrl,
+                    streamUrl = finalStream,
                     lyrics = result.lyricsText ?: dbSong.lyrics
                 )
                 songDao.insertSong(updatedSong)
                 return@withContext updatedSong
             }
-            dbSong
+            dbSong.copy(streamUrl = currentStreamUrl)
         } catch (e: Exception) {
             Log.e("MusicRepository", "Error resolving streaming address: ${e.message}")
             song
@@ -101,9 +106,31 @@ class MusicRepository(
                 streamUrlToDownload = soundHelixFallbacks[index]
             }
 
-            val directory = File(context.filesDir, "downloads")
-            if (!directory.exists()) {
-                directory.mkdirs()
+            val customDir = File("/storage/emulated/0/MusicPlayer/downloads")
+            var directory = customDir
+            var canWrite = false
+            try {
+                if (!customDir.exists()) {
+                    customDir.mkdirs()
+                }
+                val probeFile = File(customDir, ".probe")
+                if (probeFile.createNewFile()) {
+                    probeFile.delete()
+                    canWrite = true
+                } else if (probeFile.exists()) {
+                    probeFile.delete()
+                    canWrite = true
+                }
+            } catch (e: Exception) {
+                Log.w("MusicRepository", "Custom folder /storage/emulated/0/MusicPlayer/downloads is not writable: ${e.message}. Using internal storage fallback.")
+                canWrite = false
+            }
+
+            if (!canWrite) {
+                directory = File(context.filesDir, "downloads")
+                if (!directory.exists()) {
+                    directory.mkdirs()
+                }
             }
             val destinationFile = File(directory, "${song.id}.mp3")
 

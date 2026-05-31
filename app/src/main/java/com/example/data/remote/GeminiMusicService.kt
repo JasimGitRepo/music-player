@@ -374,119 +374,54 @@ class GeminiMusicService {
 
     // Resolve the playable direct stream link and LRC lyrics for a video item
     suspend fun resolvePlayableStream(videoId: String, title: String, artist: String): PipedSongStream? = withContext(Dispatchers.IO) {
-        // First try to hit Piped streams
-        val activeInstances = getActiveInstances()
-        for (instance in activeInstances) {
-            val url = "$instance/streams/$videoId"
-            Log.d("GeminiMusicService", "Resolving stream link from $url")
-            val response = getJsonFromUrl(url)
-            if (!response.isNullOrEmpty()) {
-                try {
-                    val jsonObj = JSONObject(response)
-                    val audioStreams = jsonObj.optJSONArray("audioStreams") ?: continue
-                    if (audioStreams.length() == 0) continue
-
-                    // Locate audio stream
-                    var preferredUrl = ""
-                    var maxBitrate = -1
-                    for (j in 0 until audioStreams.length()) {
-                        val stream = audioStreams.optJSONObject(j) ?: continue
-                        val streamUrl = stream.optString("url", "")
-                        val bitrate = stream.optInt("bitrate", -1)
-                        if (streamUrl.isNotEmpty() && bitrate > maxBitrate) {
-                            maxBitrate = bitrate
-                            preferredUrl = streamUrl
-                        }
-                    }
-                    if (preferredUrl.isEmpty() && audioStreams.length() > 0) {
-                        preferredUrl = audioStreams.getJSONObject(0).optString("url", "")
-                    }
-
-                    if (preferredUrl.isNotEmpty()) {
-                        // Gather subtitle converting
-                        var resolvedLrc: String? = null
-                        val subtitles = jsonObj.optJSONArray("subtitles")
-                        if (subtitles != null && subtitles.length() > 0) {
-                            var subUrl = ""
-                            for (s in 0 until subtitles.length()) {
-                                val sub = subtitles.optJSONObject(s) ?: continue
-                                val code = sub.optString("code", "")
-                                if (code.startsWith("en") || subUrl.isEmpty()) {
-                                    subUrl = sub.optString("url", "")
-                                    if (code.startsWith("en")) break
-                                }
-                            }
-                            if (subUrl.isNotEmpty()) {
-                                val vttContent = getJsonFromUrl(subUrl)
-                                if (!vttContent.isNullOrEmpty()) {
-                                    resolvedLrc = convertVttToLrc(vttContent)
-                                }
-                            }
-                        }
-
-                        // Playback fallback timed lyrics via Gemini if subtitle conversion yields empty results
-                        if (resolvedLrc.isNullOrBlank()) {
-                            Log.d("GeminiMusicService", "No subtitles found. Requesting timed LRC lyrics from Gemini...")
-                            resolvedLrc = generateLyricsWithGemini(title, artist)
-                        }
-
-                        return@withContext PipedSongStream(
-                            streamUrl = preferredUrl,
-                            lyricsText = resolvedLrc
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("GeminiMusicService", "Error decoding stream for index $instance: ${e.message}")
-                }
-            }
-        }
-        null
+        // Since we are using iTunes API directly, the streamURL is already the preview URL.
+        // We just need to generate lyrics via Gemini if they are missing.
+        val resolvedLrc = generateLyricsWithGemini(title, artist)
+        return@withContext PipedSongStream(
+            streamUrl = "", // handled by iTunes API search result directly so we return empty here to not override
+            lyricsText = resolvedLrc
+        )
     }
 
     suspend fun searchSongsAndLyrics(query: String): List<Song> = withContext(Dispatchers.IO) {
-        Log.d("GeminiMusicService", "Starting actual YouTube search via Piped Proxy servers for: $query")
+        Log.d("GeminiMusicService", "Starting iTunes API search for: $query")
         
-        // Try real YouTube search query via Piped lists
-        val activeInstances = getActiveInstances()
-        for (instance in activeInstances) {
+        try {
             val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
-            val url = "$instance/search?q=$encodedQuery&filter=all"
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=song&limit=15"
             val response = getJsonFromUrl(url)
+            
             if (!response.isNullOrEmpty()) {
-                try {
-                    val jsonObj = JSONObject(response)
-                    val items = jsonObj.optJSONArray("items") ?: continue
+                val jsonObj = JSONObject(response)
+                val results = jsonObj.optJSONArray("results")
+                if (results != null) {
                     val songs = mutableListOf<Song>()
-                    for (i in 0 until items.length()) {
-                        val item = items.optJSONObject(i) ?: continue
-                        val itemType = item.optString("type", "")
-                        if (itemType == "stream") {
-                            val rawUrl = item.optString("url", "")
-                            var videoId = rawUrl.substringAfter("v=", "").ifEmpty {
-                                item.optString("videoId", "")
-                            }
-                            if (videoId.contains("&")) {
-                                videoId = videoId.substringBefore("&")
-                            }
-                            if (videoId.isEmpty()) continue
+                    for (i in 0 until results.length()) {
+                        val item = results.optJSONObject(i) ?: continue
+                        
+                        val trackId = item.optLong("trackId", 0L).toString()
+                        val title = item.optString("trackName", "Unknown Track")
+                        val artist = item.optString("artistName", "Unknown Artist")
+                        val album = item.optString("collectionName", "Unknown Album")
+                        val previewUrl = item.optString("previewUrl", "")
+                        var artworkUrl = item.optString("artworkUrl100", "")
+                        if (artworkUrl.isNotEmpty()) {
+                            artworkUrl = artworkUrl.replace("100x100bb", "600x600bb")
+                        }
+                        // iTunes provides full track time, but preview is usually 30s. 
+                        // We will report the full track time for UI.
+                        val durationMs = item.optLong("trackTimeMillis", 180000L)
 
-                            val title = item.optString("title", "Unknown Video")
-                            val artist = item.optString("uploaderName", "YouTube Music").ifEmpty {
-                                item.optString("uploader", "YouTube Creator")
-                            }
-                            val durationSec = item.optLong("duration", 210)
-                            val durationMs = if (durationSec > 0) durationSec * 1000 else 210000L
-                            val thumb = item.optString("thumbnail", "")
-
+                        if (previewUrl.isNotEmpty() && trackId != "0") {
                             songs.add(
                                 Song(
-                                    id = videoId,
+                                    id = "itunes_$trackId",
                                     title = title,
                                     artist = artist,
-                                    album = "YouTube Track",
-                                    duration = durationMs,
-                                    streamUrl = "", // Decoded dynamically on demand at play/download time!
-                                    albumArtUrl = thumb.ifEmpty { "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600" },
+                                    album = album,
+                                    duration = durationMs, // Show full duration on UI
+                                    streamUrl = previewUrl, // Has the actual playable m4a 
+                                    albumArtUrl = artworkUrl.ifEmpty { "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600" },
                                     lyrics = null,
                                     isFavorite = false,
                                     downloadStatus = 0
@@ -495,13 +430,12 @@ class GeminiMusicService {
                         }
                     }
                     if (songs.isNotEmpty()) {
-                        Log.d("GeminiMusicService", "Successfully loaded ${songs.size} real YouTube assets!")
-                        return@withContext songs.take(6)
+                        return@withContext songs
                     }
-                } catch (e: Exception) {
-                    Log.e("GeminiMusicService", "Error reading items from search: ${e.message}")
                 }
             }
+        } catch (e: Exception) {
+            Log.e("GeminiMusicService", "Error reading items from iTunes search: ${e.message}")
         }
 
         // --- Clean Gemini Generation Fallback to keep experience pristine if Piped nodes are blocked ---

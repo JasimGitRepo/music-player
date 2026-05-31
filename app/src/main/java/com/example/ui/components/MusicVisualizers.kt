@@ -45,10 +45,11 @@ fun GlowingGradientBackground(
         label = "offset"
     )
 
-    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-    val secondaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+    val secondaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+    val accentColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
     val baseDark = Color(0xFF0C0E14)
-
+ 
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -56,21 +57,32 @@ fun GlowingGradientBackground(
                 val waveX = size.width / 2 + sin(animOffset) * 150f
                 val waveY = size.height / 2 + sin(animOffset + 1.5f) * 150f
                 
+                val waveX2 = size.width / 2 + sin(animOffset + 3.0f) * 180f
+                val waveY2 = size.height / 2 + sin(animOffset + 4.5f) * 180f
+ 
                 drawRect(color = baseDark)
                 
-                drawCircle(
+                drawRect(
                     brush = Brush.radialGradient(
                         colors = listOf(primaryColor, Color.Transparent),
                         center = Offset(waveX, waveY),
-                        radius = size.width * 0.95f
+                        radius = size.width * 1.30f
                     )
                 )
                 
-                drawCircle(
+                drawRect(
                     brush = Brush.radialGradient(
                         colors = listOf(secondaryColor, Color.Transparent),
                         center = Offset(size.width - waveX, size.height - waveY),
-                        radius = size.width * 0.85f
+                        radius = size.width * 1.15f
+                    )
+                )
+
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(accentColor, Color.Transparent),
+                        center = Offset(waveX2, size.height - waveY2),
+                        radius = size.width * 1.05f
                     )
                 )
             },
