@@ -31,6 +31,14 @@ import java.util.concurrent.TimeUnit
 
 data class LyricLine(val timeMs: Long, val text: String)
 
+enum class PlaybackMode {
+    SHUFFLE,            // Shuffle other songs
+    LOOP_CURRENT,       // Repeat current song
+    LOOP_ALL,           // Loop entire playlist or queue
+    PLAY_ONE_STOP,      // Play current song once, then stop
+    PLAY_ALL_STOP       // Play current playlist once, then stop
+}
+
 class MusicPlayerViewModel(application: Application) : AndroidViewModel(application) {
 
     // Database & Repository Singletons (Simple constructor/field injection pattern)
@@ -84,7 +92,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private val _activePlaylist = MutableStateFlow<Playlist?>(null)
     val activePlaylist: StateFlow<Playlist?> = _activePlaylist.asStateFlow()
 
-    // Search state
+    // Search state & Pagination
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
@@ -93,6 +101,24 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    // Playback style Mode Selection
+    private val _playbackMode = MutableStateFlow(PlaybackMode.LOOP_ALL)
+    val playbackMode: StateFlow<PlaybackMode> = _playbackMode.asStateFlow()
+
+    // Dynamic queue of songs
+    private val _activeQueue = MutableStateFlow<List<Song>>(emptyList())
+    val activeQueue: StateFlow<List<Song>> = _activeQueue.asStateFlow()
+
+    // Search Page/Pagination & Filter Settings
+    private val _searchPage = MutableStateFlow(1)
+    val searchPage: StateFlow<Int> = _searchPage.asStateFlow()
+
+    private val _onlyLongSongs = MutableStateFlow(false)
+    val onlyLongSongs: StateFlow<Boolean> = _onlyLongSongs.asStateFlow()
+
+    private val _canLoadMore = MutableStateFlow(true)
+    val canLoadMore: StateFlow<Boolean> = _canLoadMore.asStateFlow()
 
     // Downloading indicators
     private val _downloadProgressMap = MutableStateFlow<Map<String, Float>>(emptyMap())
@@ -159,13 +185,13 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                         if (state == Player.STATE_READY) {
                             _duration.value = duration.coerceAtLeast(1L)
                         } else if (state == Player.STATE_ENDED) {
-                            playNext()
+                            onSongEnded()
                         }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
                         Log.e("MusicPlayerViewModel", "ExoPlayer Error: ${error.message}", error)
-                        Toast.makeText(getApplication(), "Error playing media: ${error.message}", Toast.LENGTH_SHORT).show()
+                        showToast("Error playing media: ${error.message}")
                     }
                 })
             }
@@ -195,6 +221,11 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
             setupPlayer()
             _currentSong.value = song
             _parsedLyrics.value = parseLrc(song.lyrics)
+
+            // Auto-append clicked song to the active queue if not already there
+            if (!_activeQueue.value.any { it.id == song.id }) {
+                _activeQueue.value = _activeQueue.value + song
+            }
 
             // Dynamic YouTube live resolution
             val resolvedSong = if (song.localFilePath == null || !File(song.localFilePath).exists()) {
@@ -249,40 +280,237 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun getActiveQueue(): List<Song> {
+        return if (_activeQueue.value.isNotEmpty()) {
+            _activeQueue.value
+        } else {
+            allSongs.value
+        }
+    }
+
     fun playNext() {
         viewModelScope.launch {
-            val list = if (activePlaylist.value != null) _playlistSongs.value else allSongs.value
+            val list = if (activePlaylist.value != null) _playlistSongs.value else getActiveQueue()
             if (list.isEmpty()) return@launch
             val currentIndex = list.indexOfFirst { it.id == _currentSong.value?.id }
-            val nextIndex = if (currentIndex == -1 || currentIndex == list.size - 1) 0 else currentIndex + 1
+
+            val nextIndex = when (playbackMode.value) {
+                PlaybackMode.SHUFFLE -> {
+                    if (list.size <= 1) 0 else {
+                        var rand = kotlin.random.Random.nextInt(list.size)
+                        while (rand == currentIndex && list.size > 1) {
+                            rand = kotlin.random.Random.nextInt(list.size)
+                        }
+                        rand
+                    }
+                }
+                else -> {
+                    if (currentIndex == -1 || currentIndex == list.size - 1) 0 else currentIndex + 1
+                }
+            }
             playSong(list[nextIndex])
         }
     }
 
     fun playPrevious() {
         viewModelScope.launch {
-            val list = if (activePlaylist.value != null) _playlistSongs.value else allSongs.value
+            val list = if (activePlaylist.value != null) _playlistSongs.value else getActiveQueue()
             if (list.isEmpty()) return@launch
             val currentIndex = list.indexOfFirst { it.id == _currentSong.value?.id }
-            val prevIndex = if (currentIndex == -1) 0 else if (currentIndex == 0) list.size - 1 else currentIndex - 1
+
+            val prevIndex = when (playbackMode.value) {
+                PlaybackMode.SHUFFLE -> {
+                    if (list.size <= 1) 0 else {
+                        var rand = kotlin.random.Random.nextInt(list.size)
+                        while (rand == currentIndex && list.size > 1) {
+                            rand = kotlin.random.Random.nextInt(list.size)
+                        }
+                        rand
+                    }
+                }
+                else -> {
+                    if (currentIndex == -1) 0 else if (currentIndex == 0) list.size - 1 else currentIndex - 1
+                }
+            }
             playSong(list[prevIndex])
         }
     }
 
-    // --- Search Logic ---
+    fun onSongEnded() {
+        viewModelScope.launch(Dispatchers.Main) {
+            val list = if (activePlaylist.value != null) _playlistSongs.value else getActiveQueue()
+            if (list.isEmpty()) return@launch
+            val currentIndex = list.indexOfFirst { it.id == _currentSong.value?.id }
+
+            when (playbackMode.value) {
+                PlaybackMode.LOOP_CURRENT -> {
+                    exoPlayer?.seekTo(0)
+                    exoPlayer?.play()
+                }
+                PlaybackMode.PLAY_ONE_STOP -> {
+                    exoPlayer?.pause()
+                    _isPlaying.value = false
+                }
+                PlaybackMode.LOOP_ALL -> {
+                    val nextIndex = if (currentIndex == -1 || currentIndex == list.size - 1) 0 else currentIndex + 1
+                    playSong(list[nextIndex])
+                }
+                PlaybackMode.SHUFFLE -> {
+                    val nextIndex = if (list.size <= 1) 0 else {
+                        var rand = kotlin.random.Random.nextInt(list.size)
+                        while (rand == currentIndex && list.size > 1) {
+                            rand = kotlin.random.Random.nextInt(list.size)
+                        }
+                        rand
+                    }
+                    playSong(list[nextIndex])
+                }
+                PlaybackMode.PLAY_ALL_STOP -> {
+                    if (currentIndex != -1 && currentIndex < list.size - 1) {
+                        playSong(list[currentIndex + 1])
+                    } else {
+                        exoPlayer?.pause()
+                        _isPlaying.value = false
+                    }
+                }
+            }
+        }
+    }
+
+    fun cyclePlaybackMode() {
+        val current = _playbackMode.value
+        val nextMode = when (current) {
+            PlaybackMode.LOOP_ALL -> PlaybackMode.LOOP_CURRENT
+            PlaybackMode.LOOP_CURRENT -> PlaybackMode.SHUFFLE
+            PlaybackMode.SHUFFLE -> PlaybackMode.PLAY_ONE_STOP
+            PlaybackMode.PLAY_ONE_STOP -> PlaybackMode.PLAY_ALL_STOP
+            PlaybackMode.PLAY_ALL_STOP -> PlaybackMode.LOOP_ALL
+        }
+        _playbackMode.value = nextMode
+        val label = when (nextMode) {
+            PlaybackMode.LOOP_ALL -> "Loop Playlist"
+            PlaybackMode.LOOP_CURRENT -> "Loop Current Song"
+            PlaybackMode.SHUFFLE -> "Shuffle Queue"
+            PlaybackMode.PLAY_ONE_STOP -> "Play Single & Stop"
+            PlaybackMode.PLAY_ALL_STOP -> "Play Playlist & Stop"
+        }
+        showToast("Playback Mode: $label")
+    }
+
+    fun addToQueue(song: Song) {
+        if (!_activeQueue.value.any { it.id == song.id }) {
+            _activeQueue.value = _activeQueue.value + song
+            showToast("Added to queue: ${song.title}")
+        }
+    }
+
+    fun removeFromQueue(songId: String) {
+        _activeQueue.value = _activeQueue.value.filterNot { it.id == songId }
+        showToast("Removed from queue")
+        // If current song removed, play next
+        if (_currentSong.value?.id == songId) {
+            if (_activeQueue.value.isNotEmpty()) {
+                playSong(_activeQueue.value[0])
+            } else {
+                _currentSong.value = null
+                exoPlayer?.stop()
+                _isPlaying.value = false
+            }
+        }
+    }
+
+    fun moveQueueItem(fromIndex: Int, toIndex: Int) {
+        val list = _activeQueue.value.toMutableList()
+        if (fromIndex in list.indices && toIndex in list.indices) {
+            val item = list.removeAt(fromIndex)
+            list.add(toIndex, item)
+            _activeQueue.value = list
+        }
+    }
+
+    fun setQueue(list: List<Song>) {
+        _activeQueue.value = list
+    }
+
+    // --- Search Logic & Dedicated Worker Pagination ---
+
+    private var searchJob: Job? = null
 
     fun search(query: String) {
         _searchQuery.value = query
+        _searchPage.value = 1
+        _canLoadMore.value = true
+        searchJob?.cancel()
+
         if (query.trim().isEmpty()) {
             _searchResults.value = emptyList()
+            _isSearching.value = false
             return
         }
-        viewModelScope.launch {
+
+        searchJob = viewModelScope.launch(Dispatchers.IO) {
             _isSearching.value = true
-            val results = repository.searchSongs(query)
-            _searchResults.value = results
-            _isSearching.value = false
+            delay(400) // Debounce typing input
+            try {
+                val results = repository.searchSongsPage(query, page = 1, onlyLongSongs = _onlyLongSongs.value)
+                withContext(Dispatchers.Main) {
+                    _searchResults.value = results
+                    _canLoadMore.value = results.size >= 6
+                    _isSearching.value = false
+                    // Prepopulate active queue with search results to keep navigation fluent
+                    if (results.isNotEmpty() && _activeQueue.value.isEmpty()) {
+                        _activeQueue.value = results
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MusicPlayerViewModel", "Search failure in background coroutine worker", e)
+                withContext(Dispatchers.Main) {
+                    _isSearching.value = false
+                }
+            }
         }
+    }
+
+    fun loadMoreSearchResults() {
+        val query = _searchQuery.value
+        if (query.trim().isEmpty() || _isSearching.value || !_canLoadMore.value) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val nextPage = _searchPage.value + 1
+            _isSearching.value = true
+            try {
+                val moreResults = repository.searchSongsPage(query, page = nextPage, onlyLongSongs = _onlyLongSongs.value)
+                withContext(Dispatchers.Main) {
+                    if (moreResults.isEmpty()) {
+                        _canLoadMore.value = false
+                    } else {
+                        _searchResults.value = _searchResults.value + moreResults
+                        _searchPage.value = nextPage
+                        _canLoadMore.value = moreResults.size >= 6
+                        // Sync queue
+                        _activeQueue.value = _activeQueue.value + moreResults.filter { m -> !_activeQueue.value.any { it.id == m.id } }
+                    }
+                    _isSearching.value = false
+                }
+            } catch (e: Exception) {
+                Log.e("MusicPlayerViewModel", "Load more failure in worker thread", e)
+                withContext(Dispatchers.Main) {
+                    _isSearching.value = false
+                }
+            }
+        }
+    }
+
+    fun toggleOnlyLongSongs() {
+        val newState = !_onlyLongSongs.value
+        _onlyLongSongs.value = newState
+        Log.d("MusicPlayerViewModel", "Filter toggled: onlyLongSongs = $newState")
+        
+        val stateLabel = if (newState) "Long Songs Only (>1.5m)" else "All Songs"
+        // Ensure Toast is shown on the Main Thread
+        showToast("Filter: $stateLabel")
+        
+        search(_searchQuery.value)
     }
 
     // --- Lyrics Parsing Utility ---
@@ -332,7 +560,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                     exoPlayer?.pause()
                     _timerActive.value = false
                     _timerRemainingMinutes.value = 0
-                    Toast.makeText(getApplication(), "Playback auto-stopped by Sleep Timer", Toast.LENGTH_LONG).show()
+                    showToast("Playback auto-stopped by Sleep Timer", Toast.LENGTH_LONG)
                 }
             }
         }
@@ -435,14 +663,14 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 }
                 addConsoleLog("[INFO] Offline track completely loaded at ${updatedSong?.localFilePath ?: "Disk"}")
 
-                Toast.makeText(getApplication(), "Successfully downloaded ${song.title}!", Toast.LENGTH_SHORT).show()
+                showToast("Successfully downloaded ${song.title}!")
             } catch (e: Exception) {
                 val cleanMap = _downloadProgressMap.value.toMutableMap()
                 cleanMap.remove(song.id)
                 _downloadProgressMap.value = cleanMap
                 addConsoleLog("[ERROR] Operation failed: ${e.localizedMessage}")
                 Log.e("MusicPlayerViewModel", "Error downloading song", e)
-                Toast.makeText(getApplication(), "Failed to download song: ${e.message}", Toast.LENGTH_LONG).show()
+                showToast("Failed to download song: ${e.message}", Toast.LENGTH_LONG)
             }
         }
     }
@@ -454,7 +682,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 val updatedSong = repository.getSongById(song.id)
                 _currentSong.value = updatedSong
             }
-            Toast.makeText(getApplication(), "Deleted offline download of ${song.title}", Toast.LENGTH_SHORT).show()
+            showToast("Deleted offline download of ${song.title}")
         }
     }
 
@@ -482,7 +710,7 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun createPlaylist(name: String, description: String? = null) {
         viewModelScope.launch {
             repository.createPlaylist(name, description)
-            Toast.makeText(getApplication(), "Playlist Created!", Toast.LENGTH_SHORT).show()
+            showToast("Playlist Created!")
         }
     }
 
@@ -517,14 +745,20 @@ class MusicPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun addSongToPlaylist(playlistId: Long, song: Song) {
         viewModelScope.launch {
             repository.addSongToPlaylist(playlistId, song.id)
-            Toast.makeText(getApplication(), "Added to Playlist!", Toast.LENGTH_SHORT).show()
+            showToast("Added to Playlist!")
+        }
+    }
+
+    private fun showToast(message: String, length: Int = Toast.LENGTH_SHORT) {
+        viewModelScope.launch(Dispatchers.Main) {
+            Toast.makeText(getApplication(), message, length).show()
         }
     }
 
     fun removeSongFromPlaylist(playlistId: Long, song: Song) {
         viewModelScope.launch {
             repository.removeSongFromPlaylist(playlistId, song.id)
-            Toast.makeText(getApplication(), "Removed from Playlist!", Toast.LENGTH_SHORT).show()
+            showToast("Removed from Playlist!")
         }
     }
 

@@ -30,8 +30,14 @@ class MusicRepository(
     val allPlaylists: Flow<List<Playlist>> = playlistDao.getAllPlaylists()
 
     suspend fun searchSongs(query: String): List<Song> = withContext(Dispatchers.IO) {
+        searchSongsPage(query, page = 1, onlyLongSongs = false)
+    }
+
+    suspend fun searchSongsPage(query: String, page: Int, onlyLongSongs: Boolean): List<Song> = withContext(Dispatchers.IO) {
         try {
-            val results = geminiService.searchSongsAndLyrics(query)
+            val limit = 6
+            val offset = (page - 1) * limit
+            val results = geminiService.searchSongsAndLyricsPaged(query, limit, offset, onlyLongSongs)
             // Cache details in database to ensure they are referenceable
             results.forEach { song ->
                 val existing = songDao.getSongById(song.id)
@@ -41,7 +47,7 @@ class MusicRepository(
             }
             results
         } catch (e: Exception) {
-            Log.e("MusicRepository", "Search error", e)
+            Log.e("MusicRepository", "Search error on page $page", e)
             emptyList()
         }
     }
@@ -132,7 +138,10 @@ class MusicRepository(
                     directory.mkdirs()
                 }
             }
-            val destinationFile = File(directory, "${song.id}.mp3")
+            val extension = if (streamUrlToDownload.contains(".m4a", ignoreCase = true)) "m4a"
+                            else if (streamUrlToDownload.contains(".wav", ignoreCase = true)) "wav"
+                            else "mp3"
+            val destinationFile = File(directory, "${song.id}.$extension")
 
             Log.d("MusicRepository", "Downloading ${resolvedSong.title} from $streamUrlToDownload to ${destinationFile.absolutePath}")
 
@@ -162,6 +171,18 @@ class MusicRepository(
                             }
                         }
                     }
+                }
+            }
+
+            // Also write synchronous LRC subtitle if available
+            val lyricsContent = song.lyrics ?: resolvedSong.lyrics
+            if (!lyricsContent.isNullOrBlank()) {
+                try {
+                    val lrcFile = File(directory, "${song.id}.lrc")
+                    lrcFile.writeText(lyricsContent)
+                    Log.d("MusicRepository", "Successfully downloaded LRC subtitle to ${lrcFile.absolutePath}")
+                } catch (e: Exception) {
+                    Log.e("MusicRepository", "Failed to write LRC subtitle file: ${e.message}")
                 }
             }
 

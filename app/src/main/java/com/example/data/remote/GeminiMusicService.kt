@@ -384,11 +384,16 @@ class GeminiMusicService {
     }
 
     suspend fun searchSongsAndLyrics(query: String): List<Song> = withContext(Dispatchers.IO) {
-        Log.d("GeminiMusicService", "Starting iTunes API search for: $query")
+        searchSongsAndLyricsPaged(query, limit = 15, offset = 0, onlyLongSongs = false)
+    }
+
+    suspend fun searchSongsAndLyricsPaged(query: String, limit: Int, offset: Int, onlyLongSongs: Boolean): List<Song> = withContext(Dispatchers.IO) {
+        Log.d("GeminiMusicService", "Starting iTunes API search for: $query, offset: $offset, longOnly: $onlyLongSongs")
         
         try {
             val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
-            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=song&limit=15"
+            val fetchLimit = if (onlyLongSongs) limit * 2 else limit
+            val url = "https://itunes.apple.com/search?term=$encodedQuery&entity=song&limit=$fetchLimit&offset=$offset"
             val response = getJsonFromUrl(url)
             
             if (!response.isNullOrEmpty()) {
@@ -412,6 +417,11 @@ class GeminiMusicService {
                         // We will report the full track time for UI.
                         val durationMs = item.optLong("trackTimeMillis", 180000L)
 
+                        if (onlyLongSongs && durationMs < 90000L) {
+                            Log.d("GeminiMusicService", "Filtering OUT short song: $title ($durationMs ms)")
+                            continue // Filter out shorts (less than 1.5 minutes)
+                        }
+
                         if (previewUrl.isNotEmpty() && trackId != "0") {
                             songs.add(
                                 Song(
@@ -430,7 +440,7 @@ class GeminiMusicService {
                         }
                     }
                     if (songs.isNotEmpty()) {
-                        return@withContext songs
+                        return@withContext songs.take(limit)
                     }
                 }
             }
@@ -441,17 +451,23 @@ class GeminiMusicService {
         // --- Clean Gemini Generation Fallback to keep experience pristine if Piped nodes are blocked ---
         val apiKey = BuildConfig.GEMINI_API_KEY
         if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            return@withContext LocalSongCatalog.songs.filter {
+            val matches = LocalSongCatalog.songs.filter {
                 it.title.contains(query, ignoreCase = true) ||
                 it.artist.contains(query, ignoreCase = true)
-            }.ifEmpty {
-                generateMockSearchResults(query)
+            }.filter {
+                !onlyLongSongs || it.duration >= 90000L
+            }
+            return@withContext matches.drop(offset).take(limit).ifEmpty {
+                generateMockSearchResults(query).filter { !onlyLongSongs || it.duration >= 90000L }.take(limit)
             }
         }
+
+        val longSongsRequirement = if (onlyLongSongs) "ALL songs MUST have a duration of at least 90000 milliseconds." else ""
 
         val prompt = """
             You are a YouTube Music API search and metadata simulator. The user is searching for songs with the query: "$query".
             Generate a realistic, incredibly high-quality list of 4 matching songs.
+            $longSongsRequirement
             For each song, construct:
             - 'id': A realistic YouTube ID (e.g., 'yt_2dfuS3').
             - 'title': The song title that matches or relates to the query: "$query".
@@ -488,7 +504,14 @@ class GeminiMusicService {
                 val adapter = GeminiClient.moshi.adapter<List<SongJson>>(listType)
                 val songsList = adapter.fromJson(jsonText)
                 if (songsList != null) {
-                    return@withContext songsList.map { item ->
+                    val filteredSongs = if (onlyLongSongs) {
+                        songsList.filter { 
+                            val isLong = it.duration >= 90000L
+                            if (!isLong) Log.d("GeminiMusicService", "Filtering OUT short song: ${it.title} (${it.duration} ms)")
+                            isLong
+                        }
+                    } else songsList
+                    return@withContext filteredSongs.map { item ->
                         Song(
                             id = item.id,
                             title = item.title,
@@ -504,10 +527,10 @@ class GeminiMusicService {
                     }
                 }
             }
-            generateMockSearchResults(query)
+            generateMockSearchResults(query).filter { !onlyLongSongs || it.duration >= 90000L }
         } catch (e: Exception) {
             Log.e("GeminiMusicService", "Error calling Gemini, falling back to mock results.", e)
-            generateMockSearchResults(query)
+            generateMockSearchResults(query).filter { !onlyLongSongs || it.duration >= 90000L }
         }
     }
 

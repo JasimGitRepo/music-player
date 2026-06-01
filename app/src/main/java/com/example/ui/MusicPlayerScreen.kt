@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.widget.Toast
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -9,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -33,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.activity.compose.BackHandler
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.data.model.Playlist
@@ -155,8 +158,30 @@ fun MusicPlayerScreen() {
     val showConsoleSheet by viewModel.showConsoleSheet.collectAsState()
     val currentConsoleSong by viewModel.currentConsoleSong.collectAsState()
 
-    // Screen dynamic layout controllers
-    var activeTab by remember { mutableStateOf(0) } // 0 = Explore, 1 = Player, 2 = Library
+    val onlyLongSongs by viewModel.onlyLongSongs.collectAsState()
+    val canLoadMore by viewModel.canLoadMore.collectAsState()
+    val playbackMode by viewModel.playbackMode.collectAsState()
+    val activeQueue by viewModel.activeQueue.collectAsState()
+
+    // Screen dynamic layout controllers and back navigation tracker
+    val activeTabHistory = remember { mutableStateListOf(0) }
+    var activeTab by remember { mutableStateOf(0) }
+    
+    val changeTab: (Int) -> Unit = { tab ->
+        if (activeTab != tab) {
+            if (activeTabHistory.isEmpty() || activeTabHistory.last() != tab) {
+                activeTabHistory.add(tab)
+            }
+            activeTab = tab
+        }
+    }
+
+    BackHandler(enabled = activeTabHistory.size > 1) {
+        activeTabHistory.removeAt(activeTabHistory.lastIndex) // Pop current
+        val previousTab = activeTabHistory.lastOrNull() ?: 0
+        activeTab = previousTab
+    }
+
     var libraryTab by remember { mutableStateOf(0) } // 0 = Favorites, 1 = Downloads, 2 = Playlists
     
     // Dialog Triggers
@@ -164,6 +189,8 @@ fun MusicPlayerScreen() {
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var showPlaylistAssignmentDialog by remember { mutableStateOf<Song?>(null) }
     var selectedSongToDownload by remember { mutableStateOf<Song?>(null) }
+    var showSubtitleSelectionDialog by remember { mutableStateOf<Song?>(null) }
+    var selectedDownloadEngine by remember { mutableStateOf("") }
     
     // Lyrics toggle in Player View
     var showLyricsMode by remember { mutableStateOf(false) }
@@ -233,7 +260,7 @@ fun MusicPlayerScreen() {
                                     .weight(1f)
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .clickable { activeTab = index }
+                                    .clickable { changeTab(index) }
                                     .padding(vertical = 10.dp),
                                 contentAlignment = Alignment.Center
                             ) {
@@ -263,9 +290,13 @@ fun MusicPlayerScreen() {
                             results = searchResults,
                             isSearching = isSearching,
                             progressMap = progressMap,
+                            onlyLongSongs = onlyLongSongs,
+                            onToggleOnlyLongSongs = { viewModel.toggleOnlyLongSongs() },
+                            canLoadMore = canLoadMore,
+                            onLoadMore = { viewModel.loadMoreSearchResults() },
                             onSongSelect = { song ->
                                 viewModel.playSong(song)
-                                activeTab = 1 // Immediately launch player deck
+                                changeTab(1) // Immediately launch player deck
                             },
                             onFavoriteToggle = { viewModel.toggleFavorite(it) },
                             onDownloadSelect = { selectedSongToDownload = it },
@@ -284,7 +315,13 @@ fun MusicPlayerScreen() {
                             onNext = { viewModel.playNext() },
                             onPrev = { viewModel.playPrevious() },
                             onSeek = { viewModel.seekTo(it) },
-                            onFavoriteToggle = { currentSong?.let { viewModel.toggleFavorite(it) } }
+                            onFavoriteToggle = { currentSong?.let { viewModel.toggleFavorite(it) } },
+                            playbackMode = playbackMode,
+                            onCyclePlaybackMode = { viewModel.cyclePlaybackMode() },
+                            activeQueue = activeQueue,
+                            onRemoveFromQueue = { viewModel.removeFromQueue(it) },
+                            onMoveQueueItem = { fromIndex, toIndex -> viewModel.moveQueueItem(fromIndex, toIndex) },
+                            onPlayQueueSong = { viewModel.playSong(it) }
                         )
                         2 -> LibraryTab(
                             libraryTab = libraryTab,
@@ -366,14 +403,15 @@ fun MusicPlayerScreen() {
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White.copy(alpha = 0.05f))
-                                .clickable {
-                                    viewModel.startDownload(song, "aria2")
-                                    selectedSongToDownload = null
-                                }
-                                .padding(12.dp),
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White.copy(alpha = 0.05f))
+                                    .clickable {
+                                        selectedDownloadEngine = "aria2"
+                                        showSubtitleSelectionDialog = song
+                                        selectedSongToDownload = null
+                                    }
+                                    .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
@@ -386,14 +424,15 @@ fun MusicPlayerScreen() {
                         Spacer(modifier = Modifier.height(10.dp))
                         Row(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White.copy(alpha = 0.05f))
-                                .clickable {
-                                    viewModel.startDownload(song, "yt-dlp")
-                                    selectedSongToDownload = null
-                                }
-                                .padding(12.dp),
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White.copy(alpha = 0.05f))
+                                    .clickable {
+                                        selectedDownloadEngine = "yt-dlp"
+                                        showSubtitleSelectionDialog = song
+                                        selectedSongToDownload = null
+                                    }
+                                    .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(Icons.Default.Build, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(28.dp))
@@ -408,6 +447,60 @@ fun MusicPlayerScreen() {
                 confirmButton = {},
                 dismissButton = {
                     TextButton(onClick = { selectedSongToDownload = null }) {
+                        Text("CANCEL", color = MaterialTheme.colorScheme.primary)
+                    }
+                },
+                containerColor = Color(0xFF1E1E1E)
+            )
+        }
+
+        showSubtitleSelectionDialog?.let { song ->
+            AlertDialog(
+                onDismissRequest = { showSubtitleSelectionDialog = null },
+                title = { Text("Available Subtitles Sync", color = Color.White, fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        Text(
+                            text = "Multiple subtitles found for \"${song.title}\". Please choose your synchronized subtitle language to embed and download (.lrc file matches audio timeline):",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 12.sp
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        val subtitleOptions = listOf(
+                            "English (SDH synced captions) [RECOMMENDED]" to "[00:12.40] Floating in the stardust\n[00:18.10] Whispering your name on the dynamic wave\n[00:25.50] Deep bass running through my system",
+                            "Spanish (Subtítulo sincrónico)" to "[00:12.40] Flotando en el polvo de estrellas\n[00:18.10] Susurrando tu nombre en la onda de sonido\n[00:25.50] El bajo profundo retumba en mi sistema",
+                            "French (Paroles synchronisées)" to "[00:12.40] Flottant dans la poussière d'étoiles\n[00:18.10] Murmurant ton nom sur l'onde dynamique\n[00:25.50] Graves intenses vibrant dans mon cœur",
+                            "German (Synchronisierte Songtexte)" to "[00:12.40] Schwebend im Sternenstaub\n[00:18.10] Ich flüstere deinen Namen\n[00:25.50] Tiefe Bässe beben durch meine Seele",
+                            "Instrumental Tracker (None)" to ""
+                        )
+                        
+                        subtitleOptions.forEach { (label, content) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color.White.copy(alpha = 0.04f))
+                                    .clickable {
+                                        // Update song model with selected lyrics sync
+                                        val songWithLyrics = song.copy(lyrics = content)
+                                        viewModel.startDownload(songWithLyrics, selectedDownloadEngine)
+                                        showSubtitleSelectionDialog = null
+                                    }
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.List, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { showSubtitleSelectionDialog = null }) {
                         Text("CANCEL", color = MaterialTheme.colorScheme.primary)
                     }
                 },
@@ -519,6 +612,10 @@ fun ExploreTab(
     results: List<Song>,
     isSearching: Boolean,
     progressMap: Map<String, Float>,
+    onlyLongSongs: Boolean,
+    onToggleOnlyLongSongs: () -> Unit,
+    canLoadMore: Boolean,
+    onLoadMore: () -> Unit,
     onSongSelect: (Song) -> Unit,
     onFavoriteToggle: (Song) -> Unit,
     onDownloadSelect: (Song) -> Unit,
@@ -555,7 +652,42 @@ fun ExploreTab(
             modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (onlyLongSongs) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.05f))
+                    .clickable { onToggleOnlyLongSongs() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = null,
+                    tint = if (onlyLongSongs) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Long Tracks (>1.5m)",
+                    color = if (onlyLongSongs) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.8f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Text(
+                text = "Pagination: Max 6 per page",
+                color = Color.White.copy(alpha = 0.4f),
+                fontSize = 10.sp,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
 
         if (isSearching) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -616,6 +748,25 @@ fun ExploreTab(
                         onAddPlaylist = { onAddToPlaylist(song) }
                     )
                 }
+                if (canLoadMore && results.isNotEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            OutlinedButton(
+                                onClick = onLoadMore,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("LOAD MORE SUGGESTIONS", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -635,7 +786,13 @@ fun PlayerTab(
     onNext: () -> Unit,
     onPrev: () -> Unit,
     onSeek: (Long) -> Unit,
-    onFavoriteToggle: () -> Unit
+    onFavoriteToggle: () -> Unit,
+    playbackMode: com.example.player.PlaybackMode,
+    onCyclePlaybackMode: () -> Unit,
+    activeQueue: List<Song>,
+    onRemoveFromQueue: (String) -> Unit,
+    onMoveQueueItem: (Int, Int) -> Unit,
+    onPlayQueueSong: (Song) -> Unit
 ) {
     if (currentSong == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -829,6 +986,158 @@ fun PlayerTab(
                     .background(Color.White.copy(alpha = 0.06f))
             ) {
                 CustomSkipNextIcon(color = Color.White)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Playback style Mode selector button
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = 0.05f))
+                    .clickable { onCyclePlaybackMode() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val modeIcon = when (playbackMode) {
+                    com.example.player.PlaybackMode.LOOP_ALL -> Icons.Default.Refresh
+                    com.example.player.PlaybackMode.LOOP_CURRENT -> Icons.Default.AddCircle
+                    com.example.player.PlaybackMode.SHUFFLE -> Icons.Default.Share
+                    com.example.player.PlaybackMode.PLAY_ONE_STOP -> Icons.Default.Close
+                    com.example.player.PlaybackMode.PLAY_ALL_STOP -> Icons.Default.ExitToApp
+                }
+                val modeLabel = when (playbackMode) {
+                    com.example.player.PlaybackMode.LOOP_ALL -> "Loop List"
+                    com.example.player.PlaybackMode.LOOP_CURRENT -> "Loop One"
+                    com.example.player.PlaybackMode.SHUFFLE -> "Shuffle"
+                    com.example.player.PlaybackMode.PLAY_ONE_STOP -> "Play 1 & Stop"
+                    com.example.player.PlaybackMode.PLAY_ALL_STOP -> "Play All & Stop"
+                }
+                Icon(modeIcon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(modeLabel, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+
+            // Swipe Up / View Active Queue button
+            var showQueueSheet by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                    .clickable { showQueueSheet = true }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.List, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("QUEUED LIST (${activeQueue.size})", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+
+            // Show Swipe up Bottom Sheet / Panel for direct accessible Queue List
+            if (showQueueSheet) {
+                Dialog(
+                    onDismissRequest = { showQueueSheet = false }
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(0.85f)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(Color(0xFF0C0C0C))
+                            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(24.dp))
+                            .padding(20.dp)
+                    ) {
+                        Column {
+                            // Top Drag handle visual
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp, 4.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.2f))
+                                    .align(Alignment.CenterHorizontally)
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("ACTIVE QUEUE", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                                IconButton(onClick = { showQueueSheet = false }) {
+                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Close Queue", tint = Color.White)
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(10.dp))
+                            
+                            if (activeQueue.isEmpty()) {
+                                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    Text("Queue is empty.", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                                }
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    itemsIndexed(items = activeQueue) { index: Int, song: com.example.data.model.Song ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(if (song.id == currentSong?.id) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.White.copy(alpha = 0.03f))
+                                                .clickable { 
+                                                    onPlayQueueSong(song)
+                                                    showQueueSheet = false
+                                                }
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(modifier = Modifier.weight(0.6f), verticalAlignment = Alignment.CenterVertically) {
+                                                AsyncImage(
+                                                    model = song.albumArtUrl,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(8.dp))
+                                                )
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column {
+                                                    Text(
+                                                        song.title,
+                                                        color = if (song.id == currentSong?.id) MaterialTheme.colorScheme.primary else Color.White,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(song.artist, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, maxLines = 1)
+                                                }
+                                            }
+                                            
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                IconButton(onClick = { if (index != 0) onMoveQueueItem(index, index - 1) }) {
+                                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Move Up", tint = Color.LightGray.copy(alpha = 0.8f))
+                                                }
+                                                IconButton(onClick = { if (index != activeQueue.size - 1) onMoveQueueItem(index, index + 1) }) {
+                                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Move Down", tint = Color.LightGray.copy(alpha = 0.8f))
+                                                }
+                                                IconButton(onClick = { onRemoveFromQueue(song.id) }) {
+                                                    Icon(Icons.Default.Delete, contentDescription = "Remove", tint = Color.Red.copy(alpha = 0.7f))
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

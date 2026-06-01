@@ -45,10 +45,10 @@ fun GlowingGradientBackground(
         label = "offset"
     )
 
-    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-    val secondaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
-    val accentColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
-    val baseDark = Color(0xFF0C0E14)
+    val primaryColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+    val secondaryColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.10f)
+    val accentColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.08f)
+    val baseDark = Color(0xFF04060A)
  
     Box(
         modifier = modifier
@@ -62,6 +62,21 @@ fun GlowingGradientBackground(
  
                 drawRect(color = baseDark)
                 
+                // Outer space stars dust particles
+                val random = java.util.Random(1337)
+                for (i in 0..45) {
+                    val dotX = random.nextFloat() * size.width
+                    val dotY = random.nextFloat() * size.height
+                    val starSize = 1.5f + random.nextFloat() * 3f
+                    // Slow breathing twinkle animation
+                    val starAlpha = 0.12f + 0.40f * sin(animOffset + (i * 3).toFloat())
+                    drawCircle(
+                        color = Color.White.copy(alpha = starAlpha.coerceIn(0f, 1f)),
+                        radius = starSize,
+                        center = Offset(dotX, dotY)
+                    )
+                }
+
                 drawRect(
                     brush = Brush.radialGradient(
                         colors = listOf(primaryColor, Color.Transparent),
